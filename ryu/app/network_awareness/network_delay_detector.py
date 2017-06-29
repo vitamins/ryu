@@ -116,7 +116,6 @@ class NetworkDelayDetector(app_manager.RyuApp):
 
     def get_delay(self, src, dst):
         """
-            Get link delay.
                         Controller
                         |        |
         src echo latency|        |dst echo latency
@@ -124,16 +123,13 @@ class NetworkDelayDetector(app_manager.RyuApp):
                    SwitchA-------SwitchB
                         
                     fwd_delay--->
-                        <----reply_delay
-            delay = (forward delay + reply delay - src datapath's echo latency
         """
         try:
             fwd_delay = self.awareness.graph[src][dst]['lldpdelay']
-            re_delay = self.awareness.graph[dst][src]['lldpdelay']
             src_latency = self.echo_latency[src]
             dst_latency = self.echo_latency[dst]
             
-            delay = (fwd_delay + re_delay - src_latency - dst_latency)/2
+            delay = fwd_delay - src_latency - dst_latency
             return max(delay, 0)
         except:
             return float('inf')
