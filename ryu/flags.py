@@ -112,3 +112,9 @@ CONF.register_cli_opts([
         help='Initial Router ID used by Zebra protocol service '
              '(default: %s)' % DEFAULT_ZSERV_ROUTER_ID),
 ], group='zapi')
+
+CONF.register_cli_opts([
+    # k_shortest_forwarding
+    cfg.IntOpt('k-paths', default=1, help='number for k shortest paths'),
+    cfg.StrOpt('weight', default='hop',
+               help='weight type of computing shortest path.')])
