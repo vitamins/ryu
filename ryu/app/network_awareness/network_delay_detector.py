@@ -129,7 +129,7 @@ class NetworkDelayDetector(app_manager.RyuApp):
             src_latency = self.echo_latency[src]
             dst_latency = self.echo_latency[dst]
             
-            delay = fwd_delay - src_latency - dst_latency
+            delay = fwd_delay - src_latency/2 - dst_latency/2 - 0.003
             return max(delay, 0)
         except:
             return float('inf')
