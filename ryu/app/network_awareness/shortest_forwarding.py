@@ -37,6 +37,8 @@ import network_awareness
 import network_monitor
 import network_delay_detector
 
+import time
+
 CONF = cfg.CONF
 
 class ShortestForwarding(app_manager.RyuApp):
@@ -119,7 +121,8 @@ class ShortestForwarding(app_manager.RyuApp):
             ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
-                      idle_timeout=15, hard_timeout=60)
+                      #idle_timeout=15, hard_timeout=60)
+                      idle_timeout=60, hard_timeout=120)
 
     def _build_packet_out(self, datapath, buffer_id, src_port, dst_port, data):
         """
@@ -269,10 +272,18 @@ class ShortestForwarding(app_manager.RyuApp):
         if dst_location:
             dst_sw = dst_location[0]
 
+        """
+        # can reveal the race condition
+        if src_sw == dst_sw:
+            print(src_sw)
+            print(dst_sw)
+        """
+
         return src_sw, dst_sw
 
     def install_flow(self, datapaths, link_to_port, access_table, path,
-                     flow_info, buffer_id, data=None):
+                     flow_info, buffer_id, data=None, bidir=False):
+        # flow_info = (eth_type, ip_src, ip_dst, in_port)
         ''' 
             Install flow entires for roundtrip: go and back.
             @parameter: path=[dpid1, dpid2...]
@@ -284,7 +295,9 @@ class ShortestForwarding(app_manager.RyuApp):
         in_port = flow_info[3]
         first_dp = datapaths[path[0]]
         out_port = first_dp.ofproto.OFPP_LOCAL
-        back_info = (flow_info[0], flow_info[2], flow_info[1])
+        if bidir:
+            # source and destination ip swapped
+            back_info = (flow_info[0], flow_info[2], flow_info[1])
 
         # inter_link
         if len(path) > 2:
@@ -297,7 +310,8 @@ class ShortestForwarding(app_manager.RyuApp):
                     src_port, dst_port = port[1], port_next[0]
                     datapath = datapaths[path[i]]
                     self.send_flow_mod(datapath, flow_info, src_port, dst_port)
-                    self.send_flow_mod(datapath, back_info, dst_port, src_port)
+                    if bidir:
+                        self.send_flow_mod(datapath, back_info, dst_port, src_port)
                     self.logger.debug("inter_link flow install")
         if len(path) > 1:
             # the last flow entry: tor -> host
@@ -315,7 +329,8 @@ class ShortestForwarding(app_manager.RyuApp):
 
             last_dp = datapaths[path[-1]]
             self.send_flow_mod(last_dp, flow_info, src_port, dst_port)
-            self.send_flow_mod(last_dp, back_info, dst_port, src_port)
+            if bidir:
+                self.send_flow_mod(last_dp, back_info, dst_port, src_port)
 
             # the first flow entry
             port_pair = self.get_port_pair_from_link(link_to_port,
@@ -325,7 +340,10 @@ class ShortestForwarding(app_manager.RyuApp):
                 return
             out_port = port_pair[0]
             self.send_flow_mod(first_dp, flow_info, in_port, out_port)
-            self.send_flow_mod(first_dp, back_info, out_port, in_port)
+            if bidir:
+                self.send_flow_mod(first_dp, back_info, out_port, in_port)
+            # race condition between flow mod and packet out?
+            #time.sleep(1)
             self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
 
         # src and dst on the same datapath
@@ -335,7 +353,8 @@ class ShortestForwarding(app_manager.RyuApp):
                 self.logger.info("Out_port is None in same dp")
                 return
             self.send_flow_mod(first_dp, flow_info, in_port, out_port)
-            self.send_flow_mod(first_dp, back_info, out_port, in_port)
+            if bidir:
+                self.send_flow_mod(first_dp, back_info, out_port, in_port)
             self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
 
     def shortest_forwarding(self, msg, eth_type, ip_src, ip_dst):
@@ -352,15 +371,20 @@ class ShortestForwarding(app_manager.RyuApp):
         if result:
             src_sw, dst_sw = result[0], result[1]
             if dst_sw:
-                # Path has already calculated, just get it.
+                # path is calculated on-demand for dynamic weights
                 path = self.get_path(src_sw, dst_sw, weight=self.weight)
                 self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
                 flow_info = (eth_type, ip_src, ip_dst, in_port)
                 # install flow entries to datapath along side the path.
+                # For number of hops metric paths are bidirectional
+                if self.weight == 'weight':
+                    bidir=True
+                else:
+                    bidir=False
                 self.install_flow(self.datapaths,
                                   self.awareness.link_to_port,
                                   self.awareness.access_table, path,
-                                  flow_info, msg.buffer_id, msg.data)
+                                  flow_info, msg.buffer_id, msg.data, bidir)
         return
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)

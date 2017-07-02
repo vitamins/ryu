@@ -262,10 +262,10 @@ class NetworkAwareness(app_manager.RyuApp):
         in_port = msg.match['in_port']
         pkt = packet.Packet(msg.data)
 
-        eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
+        #eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
        
         arp_pkt = pkt.get_protocol(arp.arp)
-        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        #ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
         if arp_pkt:
             arp_src_ip = arp_pkt.src_ip
@@ -277,32 +277,30 @@ class NetworkAwareness(app_manager.RyuApp):
 
     def show_topology(self):
         switch_num = len(list(self.graph.nodes()))
+        """
         if self.pre_graph != self.graph and setting.TOSHOW:
             print("---------------------Topo Link---------------------")
-            print('%10s' % ("switch"), end=' ')
-            for i in self.graph.nodes():
-                print('%10d' % i, end=' ')
-            print("")
-            for i in self.graph.nodes():
-                print('%10d' % i, end=' ')
-                for j in list(self.graph[i].values()):
-                    print('%10.0f' % j['weight'], end=' ')
-                print("")
+            print("src  dst  weight")
+            for n,nbrsdict in self.graph.adjacency_iter():
+                for nbr,eattr in nbrsdict.items():
+                    if 'weight' in eattr:
+                        print('%3s' % n, '%3s' % nbr, '%5s' % eattr['weight'])
             self.pre_graph = copy.deepcopy(self.graph)
+        """
 
         if self.pre_link_to_port != self.link_to_port and setting.TOSHOW:
             print("---------------------Link Port---------------------")
-            print('%10s' % ("switch"), end=' ')
+            print('%7s' % ("switch"), end=' ')
             for i in self.graph.nodes():
-                print('%10d' % i, end=' ')
+                print('%7d' % i, end=' ')
             print("")
             for i in self.graph.nodes():
-                print('%10d' % i, end=' ')
+                print('%7d' % i, end=' ')
                 for j in self.graph.nodes():
                     if (i, j) in list(self.link_to_port.keys()):
-                        print('%10s' % str(self.link_to_port[(i, j)]), end=' ')
+                        print('%7s' % str(self.link_to_port[(i, j)]), end=' ')
                     else:
-                        print('%10s' % "No-link", end=' ')
+                        print('%7s' % "-", end=' ')
                 print("")
             self.pre_link_to_port = copy.deepcopy(self.link_to_port)
 
