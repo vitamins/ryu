@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 import logging
 import struct
 import networkx as nx
@@ -27,6 +28,7 @@ from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
+from ryu.lib.packet import ether_types
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import arp
 
@@ -37,9 +39,12 @@ import network_awareness
 import network_monitor
 import network_delay_detector
 
-import time
+from flow import Flow
+
 
 CONF = cfg.CONF
+
+MONITOR_MATCH_SRC="00:00:00:00:00:01"
 
 class ShortestForwarding(app_manager.RyuApp):
     """
@@ -66,6 +71,7 @@ class ShortestForwarding(app_manager.RyuApp):
         self.delay_detector = kwargs["network_delay_detector"]
         self.datapaths = {}
         self.weight = self.WEIGHT_MODEL[CONF.weight]
+        self.flows = {}
 
     def set_weight_mode(self, weight):
         """
@@ -108,17 +114,22 @@ class ShortestForwarding(app_manager.RyuApp):
                                 match=match, instructions=inst)
         dp.send_msg(mod)
 
-    def send_flow_mod(self, datapath, flow_info, src_port, dst_port):
+    def send_flow_mod(self, datapath, flow_info, src_port, dst_port, monitor=False):
         """
             Build flow entry, and send it to datapath.
         """
+        ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         actions = []
         actions.append(parser.OFPActionOutput(dst_port))
-
-        match = parser.OFPMatch(
-            in_port=src_port, eth_type=flow_info[0],
-            ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
+        if monitor:
+            # also forward to controller for monitoring
+            if monitor:
+                actions.append(parser.OFPActionSetField(eth_src=MONITOR_MATCH_SRC))
+            actions.append(parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                                  ofproto.OFPCML_NO_BUFFER))
+        match = parser.OFPMatch(in_port=src_port, eth_type=flow_info[0],
+                                ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
 
         self.add_flow(datapath, 1, match, actions,
                       #idle_timeout=15, hard_timeout=60)
@@ -282,7 +293,7 @@ class ShortestForwarding(app_manager.RyuApp):
         return src_sw, dst_sw
 
     def install_flow(self, datapaths, link_to_port, access_table, path,
-                     flow_info, buffer_id, data=None, bidir=False):
+                     flow_info, buffer_id, data=None, bidir=False, monitor=False):
         # flow_info = (eth_type, ip_src, ip_dst, in_port)
         ''' 
             Install flow entires for roundtrip: go and back.
@@ -329,6 +340,10 @@ class ShortestForwarding(app_manager.RyuApp):
 
             last_dp = datapaths[path[-1]]
             self.send_flow_mod(last_dp, flow_info, src_port, dst_port)
+            # add code to forward to controller from last entry
+            if monitor:
+                print("Installed monitor entry at destination.")
+                self.send_flow_mod(last_dp, flow_info, src_port, dst_port, monitor=monitor)
             if bidir:
                 self.send_flow_mod(last_dp, back_info, dst_port, src_port)
 
@@ -340,14 +355,21 @@ class ShortestForwarding(app_manager.RyuApp):
                 return
             out_port = port_pair[0]
             self.send_flow_mod(first_dp, flow_info, in_port, out_port)
+            # add code to forward to controller from first entry
+            if monitor:
+                print("Installed monitor entry at source.")
+                self.send_flow_mod(first_dp, flow_info, in_port, out_port, monitor=monitor)
             if bidir:
                 self.send_flow_mod(first_dp, back_info, out_port, in_port)
             # race condition between flow mod and packet out?
-            #time.sleep(1)
+            # sleeping for 1 ms avoids it (tested in mininet)
+            time.sleep(0.001)
             self.send_packet_out(first_dp, buffer_id, in_port, out_port, data)
 
         # src and dst on the same datapath
         else:
+            if monitor:
+                self.logger.info("No inter-links traversed, nothing to monitor.")
             out_port = self.get_port(flow_info[2], access_table)
             if out_port is None:
                 self.logger.info("Out_port is None in same dp")
@@ -360,12 +382,36 @@ class ShortestForwarding(app_manager.RyuApp):
     def shortest_forwarding(self, msg, eth_type, ip_src, ip_dst):
         """
             To calculate shortest forwarding path and install them into datapaths.
-
         """
+        # hardcoded
+        track = True
+        monitor = False
+        if monitor and not track:
+            self.logger.info("Track monitor setting error!")
+
         datapath = msg.datapath
         ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
         in_port = msg.match['in_port']
+
+        """
+        # filter out packet ins from race conditions and just packet out them again
+        # unfinished
+        flow_id = (eth_type, ip_src, ip_dst)#== flow_info[0:2]
+        if flow_id in self.flows:
+            self.logger.info("Race condition.")
+            
+            dp = self.datapaths[datapath]
+            # find out_port
+            i = flow.path.index(datapath)
+            # unfinished
+            if i == len(flow.path):
+                # last switch in the path
+            else:
+                # inter-switch
+
+            self.send_packet_out(dp, msg.buffer_id, in_port, out_port, msg.data)
+            return
+        """
 
         result = self.get_sw(datapath.id, in_port, ip_src, ip_dst)
         if result:
@@ -384,8 +430,36 @@ class ShortestForwarding(app_manager.RyuApp):
                 self.install_flow(self.datapaths,
                                   self.awareness.link_to_port,
                                   self.awareness.access_table, path,
-                                  flow_info, msg.buffer_id, msg.data, bidir)
+                                  flow_info, msg.buffer_id, msg.data, bidir,
+                                  monitor)
+                if track:
+                    flow_id = (eth_type, ip_src, ip_dst)#== flow_info[0:2]
+                    self.flows[flow_id] = Flow(path, flow_info, bidir, monitor)
         return
+
+    def path_delay_measure_packet_in(self, msg, eth_type, ip_src, ip_dst):
+    # TODO attribute to correct flow
+    # => Flow object
+        datapath = msg.datapath
+        #ofproto = datapath.ofproto(flow_info[0], flow_info[1], 
+        in_port = msg.match['in_port']
+        flow_id = (eth_type, ip_src, ip_dst)
+        try:
+            flow = self.flows[flow_id]
+        except KeyError:
+            self.logger.info('Flow measurement could not be attributed.')
+            return
+        dst_sw = flow.path[-1]
+        src_sw = flow.path[0]
+        # find out if we got the packet from the source or from the destination switch
+        if datapath.id == dst_sw:
+            flow.path_delay_measure.rx(msg.data)
+            print('Path delay: Last, average, max')
+            print('%f %f %f' % (flow.path_delay_measure.get_latest(), flow.path_delay_measure.get_average(), flow.path_delay_measure.get_max()))
+        elif datapath.id == src_sw:
+            flow.path_delay_measure.tx(msg.data)
+        else:
+            self.logger.info('Flow measurement could not be attributed, wrong switch.')
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -394,18 +468,29 @@ class ShortestForwarding(app_manager.RyuApp):
             Therefore, the first packet from UNKOWN host MUST be ARP.
         '''
         msg = ev.msg
+        type(msg)
         datapath = msg.datapath
         in_port = msg.match['in_port']
         pkt = packet.Packet(msg.data)
-        arp_pkt = pkt.get_protocol(arp.arp)
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+        eth_type = eth.ethertype
+        if eth_type == ether_types.ETH_TYPE_LLDP:
+            # ignore lldp packet
+            return
+        
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        eth_src = eth.src
+        if eth_src == MONITOR_MATCH_SRC:
+            self.path_delay_measure_packet_in(msg, eth_type, ip_pkt.src, ip_pkt.dst)
+            return
 
+        if isinstance(ip_pkt, ipv4.ipv4):
+            self.logger.debug("IPV4 processing")
+            self.shortest_forwarding(msg, eth_type, ip_pkt.src, ip_pkt.dst)
+
+        arp_pkt = pkt.get_protocol(arp.arp)
         if isinstance(arp_pkt, arp.arp):
             self.logger.debug("ARP processing")
             self.arp_forwarding(msg, arp_pkt.src_ip, arp_pkt.dst_ip)
 
-        if isinstance(ip_pkt, ipv4.ipv4):
-            self.logger.debug("IPV4 processing")
-            if len(pkt.get_protocols(ethernet.ethernet)):
-                eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
-                self.shortest_forwarding(msg, eth_type, ip_pkt.src, ip_pkt.dst)
+
