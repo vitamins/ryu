@@ -51,8 +51,10 @@ class NetworkMonitor(app_manager.RyuApp):
         self.stats = {}
         self.port_features = {}
         self.free_bandwidth = {}
+        self.capacity = {}
         self.awareness = lookup_service_brick('awareness')
         self.graph = None
+        self.capacity_graph = None
         self.capabilities = None
         self.best_paths = None
         # Start to green thread to monitor traffic and calculating
@@ -80,7 +82,7 @@ class NetworkMonitor(app_manager.RyuApp):
         """
             Main entry method of monitoring traffic.
         """
-        while CONF.weight == 'bw':
+        while True:
             self.stats['flow'] = {}
             self.stats['port'] = {}
             for dp in list(self.datapaths.values()):
@@ -99,10 +101,13 @@ class NetworkMonitor(app_manager.RyuApp):
         """
             Save bandwidth data into networkx graph object.
         """
-        while CONF.weight == 'bw':
-            self.graph = self.create_bw_graph(self.free_bandwidth)
-            self.logger.debug("save_freebandwidth")
+        while True:
+            self.capacity_graph = self.create_capacity_graph(self.capacity)
+            if CONF.weight == 'bw':
+                self.graph = self.create_bw_graph(self.free_bandwidth)
+                self.logger.debug("save_freebandwidth")
             hub.sleep(setting.MONITOR_PERIOD)
+        
 
     def _request_stats(self, datapath):
         """
@@ -194,14 +199,45 @@ class NetworkMonitor(app_manager.RyuApp):
                 self.awareness = lookup_service_brick('awareness')
             return self.awareness.graph
 
+    def create_capacity_graph(self, cap_dict):
+        """
+            Save capacity data into networkx graph object.
+        """
+        #try:
+        graph = self.awareness.graph
+        link_to_port = self.awareness.link_to_port
+        for link in link_to_port:
+            (src_dpid, dst_dpid) = link
+            (src_port, dst_port) = link_to_port[link]
+            if src_dpid in cap_dict and dst_dpid in cap_dict:
+                cap_src = cap_dict[src_dpid][src_port]
+                cap_dst = cap_dict[dst_dpid][dst_port]
+                cap = min(cap_src, cap_dst)
+                # add key:value of bandwidth into graph.
+                graph[src_dpid][dst_dpid]['capacity'] = cap
+            else:
+                graph[src_dpid][dst_dpid]['capacity'] = 0
+        return graph
+        """
+        except:
+            self.logger.info("Create cap graph exception")
+            if self.awareness is None:
+                self.awareness = lookup_service_brick('awareness')
+            return self.awareness.graph
+        """
+
     def _save_freebandwidth(self, dpid, port_no, speed):
         # Calculate free bandwidth of port and save it.
         port_state = self.port_features.get(dpid).get(port_no)
         if port_state:
-            capacity = port_state[2]
-            curr_bw = self._get_free_bw(capacity, speed)
+            #cap = port_state[2]
+            #hardcoded for testing
+            cap = 1000
+            curr_bw = self._get_free_bw(cap, speed)
             self.free_bandwidth[dpid].setdefault(port_no, None)
             self.free_bandwidth[dpid][port_no] = curr_bw
+            self.capacity[dpid].setdefault(port_no, None)
+            self.capacity[dpid][port_no] = cap
         else:
             self.logger.info("Fail in getting port state")
 
@@ -273,6 +309,7 @@ class NetworkMonitor(app_manager.RyuApp):
         dpid = ev.msg.datapath.id
         self.stats['port'][dpid] = body
         self.free_bandwidth.setdefault(dpid, {})
+        self.capacity.setdefault(dpid, {})
 
         for stat in sorted(body, key=attrgetter('port_no')):
             port_no = stat.port_no
@@ -317,8 +354,9 @@ class NetworkMonitor(app_manager.RyuApp):
                       ofproto.OFPPS_BLOCKED: "Blocked",
                       ofproto.OFPPS_LIVE: "Live"}
 
-        ports = []
+        #ports = []
         for p in ev.msg.body:
+            """
             ports.append('port_no=%d hw_addr=%s name=%s config=0x%08x '
                          'state=0x%08x curr=0x%08x advertised=0x%08x '
                          'supported=0x%08x peer=0x%08x curr_speed=%d '
@@ -328,6 +366,7 @@ class NetworkMonitor(app_manager.RyuApp):
                           p.state, p.curr, p.advertised,
                           p.supported, p.peer, p.curr_speed,
                           p.max_speed))
+            """
 
             if p.config in config_dict:
                 config = config_dict[p.config]
@@ -358,7 +397,6 @@ class NetworkMonitor(app_manager.RyuApp):
                        ofproto.OFPPR_MODIFY: "modified", }
 
         if reason in reason_dict:
-
             print("switch%d: port %s %s" % (dpid, reason_dict[reason], port_no))
         else:
             print("switch%d: Illeagal port state %s %s" % (port_no, reason))
@@ -411,7 +449,8 @@ class NetworkMonitor(app_manager.RyuApp):
                             stat.rx_packets, stat.rx_bytes, stat.rx_errors,
                             stat.tx_packets, stat.tx_bytes, stat.tx_errors,
                             abs(self.port_speed[(dpid, stat.port_no)][-1]),
-                            self.port_features[dpid][stat.port_no][2],
+                            #self.port_features[dpid][stat.port_no][2],
+                            self.capacity[dpid][stat.port_no],
                             self.port_features[dpid][stat.port_no][0],
                             self.port_features[dpid][stat.port_no][1])))
             print('\n')

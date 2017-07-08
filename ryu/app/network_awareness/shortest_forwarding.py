@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import random
 import time
 import logging
 import struct
@@ -74,6 +75,7 @@ class ShortestForwarding(app_manager.RyuApp):
         self.flows = {}
 
     def set_weight_mode(self, weight):
+        # Unused function
         """
             set weight mode of path calculating.
         """
@@ -124,8 +126,7 @@ class ShortestForwarding(app_manager.RyuApp):
         actions.append(parser.OFPActionOutput(dst_port))
         if monitor:
             # also forward to controller for monitoring
-            if monitor:
-                actions.append(parser.OFPActionSetField(eth_src=MONITOR_MATCH_SRC))
+            actions.append(parser.OFPActionSetField(eth_src=MONITOR_MATCH_SRC))
             actions.append(parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                                   ofproto.OFPCML_NO_BUFFER))
         match = parser.OFPMatch(in_port=src_port, eth_type=flow_info[0],
@@ -234,6 +235,14 @@ class ShortestForwarding(app_manager.RyuApp):
         shortest_paths = self.awareness.shortest_paths
         graph = self.awareness.graph
 
+        cap_min = random.choice([500, 100, 5000, 1120])
+        if cap_min:
+            paths = self.capacity_limited_paths(self.monitor.capacity_graph, src, dst, cap_min)
+            if paths:
+                return paths[0]
+            else:
+                print('DEMAND BLOCKED')
+                return None
         if weight == self.WEIGHT_MODEL['hop']:
             return shortest_paths.get(src).get(dst)[0]
         elif weight == self.WEIGHT_MODEL['delay']:
@@ -419,6 +428,8 @@ class ShortestForwarding(app_manager.RyuApp):
             if dst_sw:
                 # path is calculated on-demand for dynamic weights
                 path = self.get_path(src_sw, dst_sw, weight=self.weight)
+                if not path:
+                    return
                 self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
                 flow_info = (eth_type, ip_src, ip_dst, in_port)
                 # install flow entries to datapath along side the path.
@@ -436,6 +447,43 @@ class ShortestForwarding(app_manager.RyuApp):
                     flow_id = (eth_type, ip_src, ip_dst)#== flow_info[0:2]
                     self.flows[flow_id] = Flow(path, flow_info, bidir, monitor)
         return
+
+    def subgraph_min_capacity(self, graph, cap_min):
+        """
+            Returns a subgraph (a copy) where edges with a capacity smaller than cap_min are removed.
+        """
+        _graph = graph.copy()
+        to_remove = []
+        for e in _graph.edges_iter(data='rem_cap'):
+            if e[2]:
+                rem_cap = e[2]
+            else:
+                edge = _graph[e[0]][e[1]]
+                if 'capacity' in edge:
+                    rem_cap = _graph[e[0]][e[1]]['capacity']
+                else:
+                    # this edge does not have a capacity assigned, assume it has enough capacity
+                    rem_cap = cap_min
+            if rem_cap < cap_min:
+                to_remove.append(e)
+        #to_remove = [e for e in _graph.edges_iter(data='rem_cap', default='capacity') if e[2] < cap_min]
+        _graph.remove_edges_from(to_remove)
+        return _graph
+
+    def capacity_limited_paths(self, graph, src, dst, cap_min):#, weight='weight', k=CONF.k_paths):
+        # Heuristic, find shortest path for reserving capacity cap_min, or block demand
+        _graph = self.subgraph_min_capacity(graph, cap_min)
+        paths = self.awareness.k_shortest_paths(_graph, src, dst)#, weight=weight, k=k)
+        return paths
+
+    """
+    def reserve_capacity(self, path, res):
+        # decrement the remaining capacity in the capacity graph, if 'rem_cap' attribute doesnt exist, create it
+        # for each link in the path, remove capacity
+        # pseudocode...
+        for (first_switch, second_switch) in path:
+            self.graph[first_switch][second_switch]['rem_cap'] -= res
+    """
 
     def path_delay_measure_packet_in(self, msg, eth_type, ip_src, ip_dst):
     # TODO attribute to correct flow
