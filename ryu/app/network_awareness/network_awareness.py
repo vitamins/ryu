@@ -32,6 +32,7 @@ from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import arp
 from ryu.lib import hub
+from ryu.lib import ofctl_v1_3 as ofctl
 
 from ryu.topology import event, switches
 from ryu.topology.api import get_switch, get_link
@@ -60,12 +61,15 @@ class NetworkAwareness(app_manager.RyuApp):
         self.switch_port_table = {}  # dpip->port_num
         self.access_ports = {}       # dpid->port_num
         self.interior_ports = {}     # dpid->port_num
+        self.meter_ids = {}          # dpid->meter_id
 
         self.graph = nx.DiGraph()
         self.pre_graph = nx.DiGraph()
         self.pre_access_table = {}
         self.pre_link_to_port = {}
         self.shortest_paths = None
+
+        self.cookie = 0
 
         # Start a green thread to discover network resource.
         self.discover_thread = hub.spawn(self._discover)
@@ -96,6 +100,17 @@ class NetworkAwareness(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
                                           ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, 0, match, actions)
+        self.init_meters(datapath, ofproto, parser)
+
+    def init_meters(self, datapath, ofproto, parser):
+        self.cookie += 1
+        meter_id = self.cookie
+        self.meter_ids[datapath.id] = meter_id
+        #meter_id = self._next_cookie()
+        meter = {'meter_id': meter_id,
+                'flags': 'KBPS',
+                'bands': [{'type': 'DROP', 'rate': 30000}]}
+        ofctl.mod_meter_entry(datapath, meter, ofproto.OFPMC_ADD)
 
     def add_flow(self, dp, p, match, actions, idle_timeout=0, hard_timeout=0):
         ofproto = dp.ofproto
@@ -125,7 +140,6 @@ class NetworkAwareness(app_manager.RyuApp):
 
     def get_links(self):
         return self.link_to_port
-
 
     def get_graph(self, link_list):
         """
@@ -194,6 +208,7 @@ class NetworkAwareness(app_manager.RyuApp):
             return shortest_paths
         except:
             self.logger.debug("No path between %s and %s" % (src, dst))
+            return None
 
     def all_k_shortest_paths(self, graph, weight='weight', k=1):
         """
@@ -212,6 +227,7 @@ class NetworkAwareness(app_manager.RyuApp):
                 paths[src][dst] = self.k_shortest_paths(_graph, src, dst,
                                                         weight=weight, k=k)
         return paths
+
 
     # List the event list should be listened.
     events = [event.EventSwitchEnter,
